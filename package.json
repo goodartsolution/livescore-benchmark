@@ -1,0 +1,23 @@
+{
+  "name": "live-match-data-checker",
+  "version": "1.0.0",
+  "description": "Check match data from multiple sources",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "scraping",
+    "football",
+    "match-data"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "playwright": "^1.40.0",
+    "exceljs": "^4.4.0"
+  }
+}
+
+
