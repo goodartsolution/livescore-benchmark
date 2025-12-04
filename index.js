@@ -75,14 +75,14 @@ async function fetchFlashscoreData(url) {
         '#detail > div.duelParticipant__container > div.duelParticipant > div.duelParticipant__startTime > div'
       ).first().textContent();
       if (matchTime) matchTime = matchTime.trim();
-      
+
       // Skor değerlerini kontrol et - eğer skorlar boşsa maç başlamamış demektir
       try {
         const homeScore = await page.locator(
           '#detail > div.duelParticipant__container > div.duelParticipant > div.duelParticipant__score > div > div.detailScore__wrapper > span:nth-child(1)'
         ).first().textContent();
         const homeScoreTrimmed = homeScore ? homeScore.trim() : '';
-        
+
         // Eğer skor boşsa veya sadece "-" ise, maç başlamamış
         if (!homeScoreTrimmed || homeScoreTrimmed === '-' || homeScoreTrimmed === '') {
           console.log(`⏸️  Maç henüz başlamadı (Tarih: ${matchTime || 'Bilinmiyor'})`);
@@ -100,7 +100,7 @@ async function fetchFlashscoreData(url) {
           '#detail > div.duelParticipant__container > div.duelParticipant > div.duelParticipant__score > div > div.detailScore__wrapper > span:nth-child(1)'
         ).first().textContent();
         const homeScoreTrimmed = homeScore ? homeScore.trim() : '';
-        
+
         if (!homeScoreTrimmed || homeScoreTrimmed === '-' || homeScoreTrimmed === '') {
           console.log(`⏸️  Maç henüz başlamadı (Skor yok)`);
           return null;
@@ -116,7 +116,7 @@ async function fetchFlashscoreData(url) {
       const matchStatus = await page.locator(
         '#detail > div.duelParticipant__container > div.duelParticipant > div.duelParticipant__score > div > div.detailScore__status > span'
       ).first().textContent();
-      
+
       if (matchStatus) {
         const statusTrimmed = matchStatus.trim();
         if (statusTrimmed === 'Finished' || statusTrimmed.toLowerCase() === 'finished') {
@@ -216,6 +216,220 @@ async function fetchFlashscoreData(url) {
 }
 
 /**
+ * Goalserve API'den maç durumunu kontrol eder
+ * @returns {Object|null} Maç durumu bilgisi veya null (maç başlamadı/bitti)
+ */
+async function checkGoalserveMatchStatus(url) {
+  let timeoutId;
+  try {
+    // Timeout için AbortController kullan
+    const controller = new AbortController();
+    timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    // API'den veri çek
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+      },
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // commentaries > tournament > match yapısına eriş
+    let match;
+    try {
+      if (data.commentaries && data.commentaries.tournament) {
+        // tournament bir array olabilir veya tek bir object olabilir
+        const tournament = Array.isArray(data.commentaries.tournament)
+          ? data.commentaries.tournament[0]
+          : data.commentaries.tournament;
+
+        if (tournament && tournament.match) {
+          match = Array.isArray(tournament.match)
+            ? tournament.match[0]
+            : tournament.match;
+        }
+      }
+    } catch (error) {
+      throw new Error('Match verisi bulunamadı: ' + error.message);
+    }
+
+    if (!match) {
+      throw new Error('Match object bulunamadı');
+    }
+
+    // Maç durumunu kontrol et (@status, @time_status, @state gibi alanlar)
+    const matchStatus = match['@status'] || match['@time_status'] || match['@state'] ||
+      match.status || match.time_status || match.state || '';
+    const statusLower = String(matchStatus).toLowerCase().trim();
+
+    // Maç durumunu kontrol et
+    // Bitti durumları: finished, ft, full time, ended
+    if (statusLower === 'finished' || statusLower === 'ft' || statusLower === 'full time' ||
+      statusLower === 'ended' || statusLower === 'fin') {
+      console.log(`🏁 Goalserve: Maç bitti (Durum: ${matchStatus}), Excel'e veri eklenmeyecek`);
+      return null; // Maç bitti
+    }
+
+    // Başlamadı durumları: not started, ns, scheduled, postponed
+    if (statusLower === 'not started' || statusLower === 'ns' || statusLower === 'scheduled' ||
+      statusLower === 'postponed' || statusLower === 'cancelled' || statusLower === 'canceled') {
+      console.log(`⏸️  Goalserve: Maç henüz başlamadı (Durum: ${matchStatus}), Excel'e veri eklenmeyecek`);
+      return null; // Maç başlamadı
+    }
+
+    // Tarih ve saat kontrolü (@date ve @time kullanarak)
+    const matchDate = match['@date'] || match.date;
+    const matchTime = match['@time'] || match.time;
+
+    if (matchDate && matchTime) {
+      try {
+        // Tarih ve saati birleştir ve parse et
+        const matchDateTime = new Date(`${matchDate} ${matchTime}`);
+        const now = new Date();
+
+        // Eğer geçerli bir tarih parse edildiyse ve maç henüz başlamadıysa null döndür
+        if (!isNaN(matchDateTime.getTime()) && matchDateTime > now) {
+          console.log(`⏸️  Goalserve: Maç henüz başlamadı (Tarih: ${matchDate}, Saat: ${matchTime})`);
+          return null;
+        }
+      } catch (dateError) {
+        // Tarih parse edilemezse devam et (maç başlamış olabilir)
+        console.log('⚠️  Goalserve: Tarih parse edilemedi, devam ediliyor...');
+      }
+    }
+
+    // Skor kontrolü - eğer skorlar yoksa maç başlamamış olabilir
+    const localteam = match.localteam || match['localteam'];
+    const visitorteam = match.visitorteam || match['visitorteam'];
+    const homeScore = localteam?.['@goals'] || localteam?.goals || '';
+    const awayScore = visitorteam?.['@goals'] || visitorteam?.goals || '';
+
+    // Eğer skorlar boşsa ve durum da belirsizse, maç başlamamış olabilir
+    if (!homeScore && !awayScore && !statusLower.includes('live') && !statusLower.includes('ht') &&
+      !statusLower.includes('1st') && !statusLower.includes('2nd')) {
+      console.log(`⏸️  Goalserve: Skorlar henüz yok ve maç devam etmiyor, maç başlamamış olabilir`);
+      return null;
+    }
+
+    // Maç devam ediyor veya başlamış - devam et
+    console.log(`✅ Goalserve: Maç devam ediyor veya başlamış (Durum: ${matchStatus || 'Bilinmiyor'})`);
+    return { match, canProceed: true };
+  } catch (error) {
+    // Timeout'u temizle
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+
+    let errorMsg = error.message || error.toString() || 'Bilinmeyen hata';
+
+    // Timeout hatası için özel mesaj
+    if (error.name === 'AbortError') {
+      errorMsg = 'İstek zaman aşımına uğradı (30 saniye)';
+    }
+
+    console.error('Goalserve maç durumu kontrol hatası:', errorMsg);
+    // Hata durumunda null döndür (güvenli tarafta kal)
+    return null;
+  }
+}
+
+/**
+ * Goalserve API'den maç verilerini çeker
+ */
+async function fetchGoalserveData(url) {
+  let timeoutId;
+  try {
+    // Timeout için AbortController kullan
+    const controller = new AbortController();
+    timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    // API'den veri çek
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
+      },
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // commentaries > tournament > match yapısına eriş
+    let match;
+    try {
+      if (data.commentaries && data.commentaries.tournament) {
+        // tournament bir array olabilir veya tek bir object olabilir
+        const tournament = Array.isArray(data.commentaries.tournament)
+          ? data.commentaries.tournament[0]
+          : data.commentaries.tournament;
+
+        if (tournament && tournament.match) {
+          match = Array.isArray(tournament.match)
+            ? tournament.match[0]
+            : tournament.match;
+        }
+      }
+    } catch (error) {
+      throw new Error('Match verisi bulunamadı: ' + error.message);
+    }
+
+    if (!match) {
+      throw new Error('Match object bulunamadı');
+    }
+
+    // Home team bilgileri (localteam)
+    const localteam = match.localteam || match['localteam'];
+    const homeTeam = localteam?.['@name'] || localteam?.name || '';
+    const homeScore = localteam?.['@goals'] || localteam?.goals || '';
+
+    // Away team bilgileri (visitorteam)
+    const visitorteam = match.visitorteam || match['visitorteam'];
+    const awayTeam = visitorteam?.['@name'] || visitorteam?.name || '';
+    const awayScore = visitorteam?.['@goals'] || visitorteam?.goals || '';
+
+    return {
+      source: 'Goalserve',
+      homeTeam: homeTeam.trim(),
+      homeScore: String(homeScore || '').trim(),
+      awayTeam: awayTeam.trim(),
+      awayScore: String(awayScore || '').trim()
+    };
+  } catch (error) {
+    // Timeout'u temizle
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+
+    let errorMsg = error.message || error.toString() || 'Bilinmeyen hata';
+
+    // Timeout hatası için özel mesaj
+    if (error.name === 'AbortError') {
+      errorMsg = 'İstek zaman aşımına uğradı (30 saniye)';
+    }
+
+    console.error('Goalserve veri çekme hatası:', errorMsg);
+    return {
+      error: errorMsg
+    };
+  }
+}
+
+/**
  * Scoreleo sitesinden maç verilerini çeker
  */
 async function fetchScoreleoData(url) {
@@ -296,18 +510,32 @@ async function fetchScoreleoData(url) {
 }
 
 /**
- * Her iki siteden veri çeker ve karşılaştırır
+ * Her üç kaynaktan veri çeker ve karşılaştırır
  */
-async function fetchMatchData(flashscoreUrl, scoreleoUrl) {
+async function fetchMatchData(flashscoreUrl, scoreleoUrl, goalserveUrl) {
   console.log('Veriler çekiliyor...\n');
 
   try {
-    // Her iki siteden paralel olarak veri çek
+    // ÖNCE Goalserve'den maç durumunu kontrol et
+    if (goalserveUrl) {
+      console.log('🔍 Goalserve\'den maç durumu kontrol ediliyor...');
+      const matchStatus = await checkGoalserveMatchStatus(goalserveUrl);
+
+      // Eğer maç başlamadıysa veya bittiyse, null döndür
+      if (matchStatus === null) {
+        console.log('⏸️  Maç henüz başlamadı veya bitti, Excel\'e veri eklenmeyecek');
+        return null;
+      }
+      console.log('✅ Maç devam ediyor veya başlamış, diğer kaynaklardan veri çekiliyor...\n');
+    }
+
+    // Maç devam ediyorsa, her üç kaynaktan paralel olarak veri çek
     // Her site için ayrı browser instance kullan (daha güvenilir)
     // Scoreleo timeout sorunu olabilir, bu yüzden Promise.allSettled kullanıyoruz
-    const [flashscoreResult, scoreleoResult] = await Promise.allSettled([
+    const [flashscoreResult, scoreleoResult, goalserveResult] = await Promise.allSettled([
       fetchFlashscoreData(flashscoreUrl),
-      fetchScoreleoData(scoreleoUrl)
+      fetchScoreleoData(scoreleoUrl),
+      goalserveUrl ? fetchGoalserveData(goalserveUrl) : Promise.resolve({ error: 'Goalserve URL bulunamadı' })
     ]);
 
     // Sonuçları kontrol et
@@ -321,7 +549,7 @@ async function fetchMatchData(flashscoreUrl, scoreleoUrl) {
 
     // Eğer Flashscore null döndüyse (maç başlamadı), null döndür
     if (flashscoreData === null) {
-      console.log('⏸️  Maç henüz başlamadı, Excel\'e veri eklenmeyecek');
+      console.log('⏸️  Flashscore: Maç henüz başlamadı veya bitti, Excel\'e veri eklenmeyecek');
       return null;
     }
 
@@ -330,6 +558,14 @@ async function fetchMatchData(flashscoreUrl, scoreleoUrl) {
       : {
         error: scoreleoResult.reason?.message ||
           scoreleoResult.reason?.toString() ||
+          'Bilinmeyen hata'
+      };
+
+    const goalserveData = goalserveResult.status === 'fulfilled'
+      ? goalserveResult.value
+      : {
+        error: goalserveResult.reason?.message ||
+          goalserveResult.reason?.toString() ||
           'Bilinmeyen hata'
       };
 
@@ -356,10 +592,22 @@ async function fetchMatchData(flashscoreUrl, scoreleoUrl) {
     }
     console.log('');
 
+    console.log('=== GOALSERVE VERİLERİ ===');
+    if (goalserveData.error) {
+      console.log('Hata:', goalserveData.error);
+    } else {
+      console.log('Ev Sahibi Takım:', goalserveData.homeTeam);
+      console.log('Ev Sahibi Skor:', goalserveData.homeScore);
+      console.log('Rakip Takım:', goalserveData.awayTeam);
+      console.log('Rakip Skor:', goalserveData.awayScore);
+    }
+    console.log('');
+
     // Verileri JSON formatında da döndür
     return {
       flashscore: flashscoreData,
-      scoreleo: scoreleoData
+      scoreleo: scoreleoData,
+      goalserve: goalserveData
     };
   } catch (error) {
     console.error('Genel hata:', error.message);
@@ -533,10 +781,35 @@ async function exportToExcel(data, matchName) {
     // Scoreleo satırı renklendirilmiyor - sadece Flashscore renklendiriliyor
   }
 
-  // Sadece yeni eklenen satırları hizala (Flashscore ve Scoreleo satırları)
+  // Goalserve verileri
+  let goalserveRow;
+  if (data.goalserve && data.goalserve.error) {
+    goalserveRow = worksheet.addRow([
+      'Goalserve',
+      '-',
+      '-',
+      '-',
+      '-',
+      '-',
+      'Hata: ' + data.goalserve.error
+    ]);
+  } else if (data.goalserve) {
+    goalserveRow = worksheet.addRow([
+      'Goalserve',
+      data.goalserve.homeTeam || '',
+      data.goalserve.homeScore || '',
+      data.goalserve.awayTeam || '',
+      data.goalserve.awayScore || '',
+      fetchTime,
+      'Başarılı'
+    ]);
+  }
+
+  // Sadece yeni eklenen satırları hizala (Flashscore, Scoreleo ve Goalserve satırları)
   const rowsToAlign = [];
   if (flashscoreRow) rowsToAlign.push(flashscoreRow);
   if (scoreleoRow) rowsToAlign.push(scoreleoRow);
+  if (goalserveRow) rowsToAlign.push(goalserveRow);
 
   rowsToAlign.forEach(row => {
     row.eachCell((cell) => {
@@ -591,8 +864,9 @@ async function processMatch(match) {
     console.log(`\n📊 Maç: ${match.name}`);
     console.log(`   Flashscore: ${match.flashscore}`);
     console.log(`   Scoreleo: ${match.scoreleo}`);
+    console.log(`   Goalserve: ${match.goalserve || 'Yok'}`);
 
-    const data = await fetchMatchData(match.flashscore, match.scoreleo);
+    const data = await fetchMatchData(match.flashscore, match.scoreleo, match.goalserve);
 
     // Eğer maç başlamadıysa (data null), Excel'e yazma
     if (data === null) {
